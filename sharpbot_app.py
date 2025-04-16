@@ -2,93 +2,113 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 
-# --- FBref Scraper ---
-def scrape_avg_1h_goals(team_url):
+# Core EV math
+def implied_probability(decimal_odds):
+    return round(1 / decimal_odds, 4)
+
+def calculate_ev(prob, decimal_odds):
+    return round((decimal_odds * prob - 1) * 100, 2)
+
+def american_to_decimal(odds):
     try:
-        res = requests.get(team_url, headers={'User-Agent': 'Mozilla/5.0'})
-        soup = BeautifulSoup(res.text, 'html.parser')
-        table = soup.find('table')
-        rows = table.find_all('tr')
+        odds = int(odds)
+        return round((odds / 100) + 1, 2) if odds > 0 else round((100 / abs(odds)) + 1, 2)
+    except:
+        return 0.0
 
-        total_goals = 0
-        match_count = 0
+# FBref scraper for avg 1H goals
+def extract_avg_1h_goals(fbref_url):
+    try:
+        response = requests.get(fbref_url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.find("table", {"id": "matchlogs_for"})
+        rows = table.find_all("tr")[1:]
 
+        first_half_goals = []
         for row in rows:
-            cells = row.find_all('td')
-            if len(cells) > 5:
+            cells = row.find_all("td")
+            if len(cells) >= 5:
+                fhg = cells[4].text.strip()
                 try:
-                    first_half_score = int(cells[4].text.strip())
-                    total_goals += first_half_score
-                    match_count += 1
+                    if fhg:
+                        first_half_goals.append(float(fhg))
                 except:
-                    continue
+                    pass
 
-        avg_1h = total_goals / match_count if match_count else 0
-        return round(avg_1h, 2)
-    except Exception as e:
-        return 0
+        avg_1h_goals = round(sum(first_half_goals) / len(first_half_goals), 2) if first_half_goals else 0.0
+        return avg_1h_goals
+    except:
+        return 0.0
 
-# --- EV Calculators ---
-def calculate_pregame_ev(avg_1h_goals, odds_decimal):
-    win_probability = min(avg_1h_goals / 1.8, 0.99)
-    ev = (odds_decimal * win_probability) - 1
-    return win_probability, ev
+# Live game EV estimation based on momentum
+def estimate_live_prob(shots, corners, cards, minutes_left, goal_line="1.5"):
+    base = (shots * 1.5 + corners * 0.8)
+    if cards >= 2:
+        base += 1
+    tempo_factor = minutes_left / 30
+    raw_prob = min((base * tempo_factor) / 10, 1.0)
 
-def calculate_live_ev(minute, shots, corners, cards, odds_decimal):
-    shot_weight = 1.5
-    corner_weight = 0.8
-    card_bonus = 0.5 if cards >= 2 else 0
-    time_factor = (45 - minute) / 30
+    if goal_line == "2.5":
+        raw_prob = max(raw_prob - 0.15, 0.01)
+    return raw_prob
 
-    momentum_score = (shots * shot_weight) + (corners * corner_weight) + card_bonus
-    win_probability = min((momentum_score * time_factor) / 10, 1.0)
-    ev = (odds_decimal * win_probability) - 1
-    return win_probability, ev
+# Streamlit App Layout
+st.set_page_config(page_title="SharpBot Complete", layout="wide")
+st.title("⚽ SharpBot - Full Soccer EV Suite")
 
-# --- Streamlit UI ---
-st.set_page_config("SharpBot", layout="centered")
-st.title("⚽ SharpBot - Over 1.5 Goals EV Evaluator")
+tab1, tab2 = st.tabs(["📈 Pregame EV Evaluator", "🔥 Live Game EV Evaluator"])
 
-tab1, tab2 = st.tabs(["📊 Pre-Game (1H)", "🔥 Live Game (1H)"])
-
+# ---- Pregame Tab ----
 with tab1:
-    st.subheader("Pre-Game Over 1.5 Goals Model")
+    st.header("📊 Pregame Over 1.5 / 2.5 Goals Model")
 
-    team_url = st.text_input("FBref Team Stats URL")
-    match = st.text_input("Match Name (Optional Label)")
-    odds_input = st.text_input("Odds (+180)", value="180")
+    col1, col2 = st.columns(2)
+    with col1:
+        team1_url = st.text_input("FBref Match Logs URL - Team 1")
+    with col2:
+        team2_url = st.text_input("FBref Match Logs URL - Team 2")
 
-    if st.button("Scrape + Evaluate"):
-        try:
-            odds_decimal = 1 + (int(odds_input) / 100)
-            avg_goals = scrape_avg_1h_goals(team_url)
-            win_pct, ev = calculate_pregame_ev(avg_goals, odds_decimal)
-            st.info(f"📈 Scraped Avg 1H Goals: {avg_goals}")
-            st.success(f"✅ Est. Win %: {round(win_pct*100, 1)}%\nEV: {round(ev*100, 2)}%")
-            if ev > 0:
-                st.markdown("**🔥 +EV Detected — Bet May Be Worth Placing!**")
-            else:
-                st.warning("❌ EV too low")
-        except Exception as e:
-            st.error(f"Error: {e}")
+    odds = st.text_input("Odds (e.g. +180)", value="180")
+    goal_line = st.radio("Goal Line", ["1.5", "2.5"], horizontal=True)
 
+    if st.button("Evaluate Pregame EV"):
+        a1 = extract_avg_1h_goals(team1_url)
+        a2 = extract_avg_1h_goals(team2_url)
+        combined = a1 + a2
+        line_factor = float(goal_line)
+        prob = min(combined / line_factor, 0.99)
+        decimal = american_to_decimal(odds)
+        ev = calculate_ev(prob, decimal)
+
+        st.success(f"✅ Combined Avg Goals: {combined} | Est. Win %: {int(prob*100)}% | EV: {ev}%")
+        if ev > 5:
+            st.markdown("### ✅ Recommended Bet (Pregame)")
+        else:
+            st.warning("⚠️ Below EV Threshold")
+
+# ---- Live Game Tab ----
 with tab2:
-    st.subheader("Live Game 1H Model")
+    st.header("🔥 Live Game Evaluator (Manual Input)")
 
-    minute = st.number_input("1st Half Minute (e.g. 16)", step=1, value=16)
-    shots = st.number_input("Shots (On + Off)", step=1)
-    corners = st.number_input("Corners", step=1)
-    cards = st.number_input("Cards (Total)", step=1)
-    odds_input_live = st.text_input("Odds (+210)", value="210")
+    col1, col2 = st.columns(2)
+    with col1:
+        minute = st.number_input("Current 1H Minute", min_value=1, max_value=45, value=15)
+        shots = st.number_input("Total Shots (On + Off)", min_value=0, value=5)
+    with col2:
+        corners = st.number_input("Corner Kicks", min_value=0, value=3)
+        cards = st.number_input("Yellow/Red Cards (Total)", min_value=0, value=1)
+
+    odds_live = st.text_input("Live Odds (e.g. +220)", value="220")
+    goal_line_live = st.radio("Live Goal Line", ["1.5", "2.5"], horizontal=True)
 
     if st.button("Evaluate Live EV"):
-        try:
-            odds_decimal = 1 + (int(odds_input_live) / 100)
-            win_pct, ev = calculate_live_ev(minute, shots, corners, cards, odds_decimal)
-            st.success(f"✅ Est. Win %: {round(win_pct*100, 1)}%\nEV: {round(ev*100, 2)}%")
-            if ev > 0:
-                st.markdown("**💥 Live Bet Worth Considering!**")
-            else:
-                st.warning("❌ Not enough momentum for +EV")
-        except:
-            st.error("Invalid entry, double check odds.")
+        minutes_left = 45 - minute
+        prob = estimate_live_prob(shots, corners, cards, minutes_left, goal_line_live)
+        decimal = american_to_decimal(odds_live)
+        ev = calculate_ev(prob, decimal)
+
+        st.success(f"📈 Est. Win %: {int(prob * 100)}% | EV: {ev}%")
+        if ev > 5:
+            st.markdown("### ✅ Live Bet Recommended")
+        else:
+            st.warning("⚠️ No Edge at Current Pace")
