@@ -1,89 +1,74 @@
+# pregame_ev_gui.py
+
+import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import re
 
-headers = {"User-Agent": "Mozilla/5.0"}
-
-def implied_prob(odds): return 100 / (odds + 100)
-def ev_value(prob, odds): return round((prob - implied_prob(odds)) * 100, 2)
-
-def min_odds(est_win_pct, min_ev): return round((100 / (est_win_pct - min_ev / 100)) - 100, 2)
-
-def fetch_1h_avg(team_name):
+def extract_avg_1h_goals(fbref_url):
     try:
-        search = requests.get(f"https://fbref.com/en/search/search.fcgi?search={team_name.replace(' ', '+')}", headers=headers)
-        soup = BeautifulSoup(search.text, "html.parser")
-        link = next(a for a in soup.find_all("a", href=True) if "/en/squads/" in a["href"])
-        team = requests.get("https://fbref.com" + link["href"], headers=headers)
-        table = BeautifulSoup(team.text, "html.parser").find("table", {"id": "matchlogs_for"})
-        rows = table.find_all("tr", class_="full_table")
-        goals = []
+        response = requests.get(fbref_url, headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(response.text, "html.parser")
+        table = soup.find("table", {"id": "matchlogs_for"})
+        rows = table.find_all("tr")[1:]
+
+        first_half_goals = []
         for row in rows:
-            g = row.find("td", {"data-stat": "goals"}).text.strip()
-            if g.isdigit(): goals.append(int(g))
-        return round(sum(goals)/len(goals), 2) if len(goals) >= 5 else None
-    except:
-        return None
+            cells = row.find_all("td")
+            if len(cells) >= 5:
+                fhg = cells[4].text.strip()
+                try:
+                    if fhg:
+                        first_half_goals.append(float(fhg))
+                except:
+                    pass
 
-def fetch_odds(team1, team2, goal_line="Over 1.5"):
+        avg_1h_goals = round(sum(first_half_goals) / len(first_half_goals), 2) if first_half_goals else 0.0
+        return avg_1h_goals
+    except:
+        return 0.0
+
+def implied_prob(decimal_odds):
+    return round(1 / decimal_odds, 4)
+
+def calculate_ev(prob, decimal_odds):
+    payout = decimal_odds - 1
+    ev = round((prob * payout - (1 - prob)) * 100, 2)
+    return ev
+
+def american_to_decimal(odds):
     try:
-        search_url = f"https://www.oddsportal.com/search/results/{team1.replace(' ', '%20')}%20vs%20{team2.replace(' ', '%20')}/"
-        soup = BeautifulSoup(requests.get(search_url, headers=headers).text, "html.parser")
-        link = next(a for a in soup.find_all("a", href=True) if "/soccer/" in a["href"])
-        match_page = requests.get("https://www.oddsportal.com" + link["href"] + "over-under/", headers=headers)
-        pattern = r"1st Half - " + re.escape(goal_line) + r".*?\+(\d+)"
-        match = re.search(pattern, match_page.text, re.DOTALL)
-        return int(match.group(1)) if match else None
+        odds = int(odds)
+        if odds > 0:
+            return round((odds / 100) + 1, 2)
+        else:
+            return round((100 / abs(odds)) + 1, 2)
     except:
-        return None
+        return 0.0
 
-def estimate_win(avg):  # crude model
-    return (
-        0.30 if avg < 1.2 else
-        0.40 if avg < 1.5 else
-        0.48 if avg < 1.8 else
-        0.54 if avg < 2.1 else
-        0.60
-    )
+# GUI
+st.set_page_config(page_title="SharpBot Pregame EV", layout="centered")
+st.title("📊 SharpBot: Pregame Over 1.5 Goals Evaluator")
 
-def get_ev_bets(goal_line="Over 1.5", min_ev=5):
-    matchups = [
-        ("Real Madrid", "Arsenal"),
-        ("Liverpool", "Brighton"),
-        ("Man City", "West Ham"),
-        ("Barcelona", "Valencia"),
-        ("Inter Milan", "Napoli"),
-        ("Atletico Madrid", "Betis"),
-        ("Juventus", "Torino"),
-        ("Bayern Munich", "Leipzig"),
-        ("PSG", "Marseille"),
-        ("Ajax", "Feyenoord"),
-    ]
+st.subheader("FBref URLs for Each Team")
+t1 = st.text_input("Team 1 FBref Match Logs URL")
+t2 = st.text_input("Team 2 FBref Match Logs URL")
 
-    good_bets = []
+st.subheader("1st Half Over 1.5 Odds (e.g. +180)")
+odds_input = st.text_input("Odds", value="+180")
 
-    for team1, team2 in matchups:
-        avg1 = fetch_1h_avg(team1)
-        avg2 = fetch_1h_avg(team2)
-        if avg1 is None or avg2 is None:
-            continue
+if st.button("Scrape + Evaluate"):
+    with st.spinner("Scraping data from FBref..."):
+        g1 = extract_avg_1h_goals(t1)
+        g2 = extract_avg_1h_goals(t2)
+        total_avg = g1 + g2
+        est_prob = min(round(total_avg / 1.5, 2), 0.99)
+        dec_odds = american_to_decimal(odds_input)
+        ev = calculate_ev(est_prob, dec_odds)
 
-        avg_total = avg1 + avg2
-        est_win_pct = round(estimate_win(avg_total) * 100)
-        odds = fetch_odds(team1, team2, goal_line)
-        if odds is None:
-            continue
+    st.success(f"Scraped Avg 1H Goals: {total_avg}")
+    st.info(f"Est. Win %: {int(est_prob * 100)}%  EV: {ev}%")
 
-        ev = ev_value(est_win_pct / 100, odds)
-        if ev >= min_ev:
-            good_bets.append({
-                "match": f"{team1} vs {team2}",
-                "avg1": avg1,
-                "avg2": avg2,
-                "avg_total": round(avg_total, 2),
-                "est_win_pct": est_win_pct,
-                "odds": odds,
-                "ev": round(ev, 2)
-            })
-
-    return sorted(good_bets, key=lambda x: x['ev'], reverse=True)[:10]
+    if ev > 5:
+        st.success("✅ +EV Bet")
+    else:
+        st.warning("⚠️ EV too low")
