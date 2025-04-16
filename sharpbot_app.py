@@ -1,100 +1,88 @@
-# sharpbot_app.py
+# SharpBot: Auto Top 10 Pregame Over 1.5 EV Scanner (Streamlit App)
 
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
-import math
+import pandas as pd
 
-# --- Config ---
-ODDS_THRESHOLD = 1.7  # Minimum decimal odds
-EV_THRESHOLD = 3      # Min expected value in percent
+# --- CONFIG ---
+ODDS_THRESHOLD = 1.80  # Equivalent to +180 American odds
+EV_THRESHOLD = 0.05     # +5% EV minimum
 
-# --- Helper Functions ---
+# --- FUNCTIONS ---
 
-def american_to_decimal(odds):
-    if odds >= 100:
-        return (odds / 100) + 1
-    elif odds <= -100:
-        return (100 / abs(odds)) + 1
-    else:
-        return None
-
-def implied_prob_from_decimal(decimal_odds):
-    return 1 / decimal_odds
-
-def calculate_ev(win_prob, decimal_odds):
-    return round((win_prob * decimal_odds - 1) * 100, 2)
-
-def scrape_1h_avg_from_fbref(url):
+def fetch_fbref_1h_avg(team_url):
     try:
-        res = requests.get(url)
-        soup = BeautifulSoup(res.content, "html.parser")
+        res = requests.get(team_url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
         table = soup.find("table", {"id": "stats_squads_standard_for"})
-
-        if not table:
-            return 0.0
-
         rows = table.find_all("tr")
+
         for row in rows:
-            if "Average" in row.text:
-                avg = row.find_all("td")[-1].text.strip()
-                return float(avg) if avg else 0.0
+            if "1st Half" in row.text:
+                cells = row.find_all("td")
+                if len(cells) > 5:
+                    goals_for = float(cells[5].text.strip())
+                    return goals_for
     except:
         return 0.0
+    return 0.0
 
-# --- GUI Start ---
-st.set_page_config("SharpBot Evaluator", layout="wide")
-tab1, tab2 = st.tabs(["📊 Pre-Game (1H)", "🔥 Live Game (1H)"])
+def estimate_win_prob(avg_goals):
+    # Simple conversion based on ~58% chance if avg = 1.4
+    return min(max((avg_goals - 0.8) * 0.9, 0), 0.99)
 
-# --- Pregame Evaluator ---
-with tab1:
-    st.title("Pre-Game Over 1.5 Goals Model")
+def calculate_ev(prob, odds_decimal):
+    payout = odds_decimal
+    ev = (prob * payout) - 1
+    return ev
 
-    fbref_url = st.text_input("FBref Team Stats URL")
-    match_name = st.text_input("Match Name (Optional Label)")
-    odds_input = st.text_input("Odds (+180)", "180")
-    decimal_odds = american_to_decimal(int(odds_input))
+def scrape_top_matches():
+    # Simulated schedule for demo (replace with real scraper later)
+    matches = [
+        {"match": "Real Madrid vs Getafe", "home_url": "https://fbref.com/team1", "away_url": "https://fbref.com/team2"},
+        {"match": "Man City vs Burnley", "home_url": "https://fbref.com/team3", "away_url": "https://fbref.com/team4"},
+        {"match": "Liverpool vs Wolves", "home_url": "https://fbref.com/team5", "away_url": "https://fbref.com/team6"},
+        {"match": "Bayern vs Augsburg", "home_url": "https://fbref.com/team7", "away_url": "https://fbref.com/team8"},
+        {"match": "PSG vs Nice", "home_url": "https://fbref.com/team9", "away_url": "https://fbref.com/team10"},
+    ]
+    return matches
 
-    if st.button("Scrape + Evaluate"):
-        avg_1h_goals = scrape_1h_avg_from_fbref(fbref_url)
-        win_prob = min(1, avg_1h_goals / 1.5)
-        ev = calculate_ev(win_prob, decimal_odds)
+def run_ev_model():
+    top_matches = scrape_top_matches()
+    results = []
 
-        st.success(f"Scraped Avg 1H Goals: {avg_1h_goals:.2f}")
-        st.success(f"Est. Win %: {win_prob * 100:.1f}% | EV: {ev:.2f}%")
+    for match in top_matches:
+        avg1 = fetch_fbref_1h_avg(match["home_url"])
+        avg2 = fetch_fbref_1h_avg(match["away_url"])
+        combined_avg = avg1 + avg2
+        win_prob = estimate_win_prob(combined_avg)
+        ev = calculate_ev(win_prob, ODDS_THRESHOLD)
 
-        if ev > EV_THRESHOLD:
-            st.success("✅ Bet Recommended")
-        else:
-            st.warning("❌ EV too low")
+        results.append({
+            "Match": match["match"],
+            "Avg 1H Goals": round(combined_avg, 2),
+            "Win %": round(win_prob * 100, 1),
+            "EV": round(ev * 100, 2),
+            "Odds": ODDS_THRESHOLD
+        })
 
-# --- Live Game Evaluator ---
-with tab2:
-    st.title("Live Game Over 1.5 Goals Evaluator")
+    df = pd.DataFrame(results)
+    df = df[df["EV"] > EV_THRESHOLD * 100]
+    df = df.sort_values("EV", ascending=False).head(10)
+    return df
 
-    match_name = st.text_input("Match Name")
-    minute = st.slider("1st Half Minute", 1, 45, 15)
-    shots_on = st.number_input("Shots On Target", 0)
-    shots_off = st.number_input("Shots Off Target", 0)
-    corners = st.number_input("Corners", 0)
-    cards = st.number_input("Total Cards", 0)
-    odds_live = st.number_input("Live Odds (+180)", value=180)
+# --- STREAMLIT APP ---
 
-    decimal_live_odds = american_to_decimal(int(odds_live))
+st.set_page_config(page_title="SharpBot - Top 10 Pregame EV", layout="wide")
+st.title("⚽ SharpBot - Top 10 Pregame Over 1.5 EV Bets")
+st.markdown("Automatically shows the most +EV 1st Half Over 1.5 bets for today based on FBref stats.")
 
-    if st.button("Evaluate Live Bet"):
-        activity_score = (shots_on * 1.5 + shots_off + corners * 0.75 + cards * 0.5)
-        time_factor = (45 - minute) / 45
-        est_win = min(1, (activity_score / 10) * time_factor)
-        ev_live = calculate_ev(est_win, decimal_live_odds)
+with st.spinner("Scanning upcoming matches..."):
+    df_results = run_ev_model()
 
-        st.success(f"Live Momentum Score: {activity_score:.1f}")
-        st.success(f"Est. Win %: {est_win * 100:.1f}% | EV: {ev_live:.2f}%")
-
-        if ev_live > EV_THRESHOLD:
-            st.success("✅ Bet Live")
-        else:
-            st.warning("❌ EV too low")
-
-# Future: Add Top 10 EV pregame bet module + export option
+if not df_results.empty:
+    st.success(f"✅ Found {len(df_results)} value bets:")
+    st.dataframe(df_results, use_container_width=True)
+else:
+    st.warning("No +EV bets found right now. Try again later.")
